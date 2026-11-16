@@ -1,0 +1,1 @@
+TikTokLive==7.0.1\nrequests>=2.32,<3\n

@@ -1,0 +1,7 @@
+# Replace these comments with up to 5 TikTok usernames, one per line.
+# Example:
+# creator_one
+# creator_two
+# creator_three
+# creator_four
+# creator_five
