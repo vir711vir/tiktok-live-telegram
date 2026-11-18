@@ -1,1 +1,392 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok LIVE Checker</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px 16px;
+      font-family: Arial, sans-serif;
+      background: #f5f6fa; color: #202124;
+    }
+    .container { max-width: 760px; margin: auto; }
+    .card {
+      background: white; padding: 22px; margin-bottom: 18px;
+      border-radius: 14px; box-shadow: 0 2px 12px #0000000b;
+    }
+    h1 { margin: 0 0 8px; font-size: 27px; }
+    h2 { font-size: 19px; margin: 0 0 16px; }
+    p { color: #687080; line-height: 1.5; }
+    input, button {
+      width: 100%; padding: 12px; margin: 6px 0;
+      border-radius: 8px; font-size: 15px;
+    }
+    input { border: 1px solid #d8dce5; }
+    button {
+      border: 0; background: #202124; color: white;
+      cursor: pointer; font-weight: 600;
+    }
+    button.secondary { background: #e9ebf1; color: #202124; }
+    button.danger { background: #fff0f0; color: #b42318; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .muted { color: #737987; font-size: 13px; }
+    .message { margin-top: 10px; font-size: 14px; white-space: pre-wrap; }
+    .account, .event {
+      border-top: 1px solid #eceef2; padding: 14px 0;
+    }
+    .account-row {
+      display: flex; align-items: center;
+      justify-content: space-between; gap: 12px;
+    }
+    .account-row button { width: auto; margin: 0; padding: 9px 12px; }
+    .username { font-weight: 700; overflow-wrap: anywhere; }
+    .status { font-size: 13px; margin-top: 6px; }
+    .live { color: #d92d20; font-weight: 700; }
+    .offline { color: #667085; }
+    .pending { color: #b7791f; }
+    .hidden { display: none; }
+    .top-row {
+      display: flex; justify-content: space-between;
+      align-items: center; gap: 12px;
+    }
+    .top-row button { width: auto; }
+    @media (max-width: 480px) {
+      .card { padding: 17px; }
+      .top-row { align-items: flex-start; flex-direction: column; }
+      .top-row button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h1>🎥 TikTok LIVE Checker</h1>
+    <p>Manage your TikTok accounts and view LIVE activity.</p>
+  </div>
+
+  <section id="authSection" class="card">
+    <h2>Login / Create Account</h2>
+    <form id="authForm">
+      <input id="email" type="email" placeholder="Email address" required>
+      <input id="password" type="password" placeholder="Password (minimum 6 characters)" minlength="6" required>
+      <button type="submit" id="loginBtn">Login</button>
+      <button type="button" class="secondary" id="signupBtn">Create new account</button>
+    </form>
+    <div id="authMessage" class="message"></div>
+    <p class="muted">New users may need to confirm their email before logging in.</p>
+  </section>
+
+  <section id="appSection" class="hidden">
+    <div class="card">
+      <div class="top-row">
+        <div>
+          <h2>Your Dashboard</h2>
+          <div id="userEmail" class="muted"></div>
+        </div>
+        <button id="logoutBtn" class="secondary">Log out</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Add TikTok Account</h2>
+      <form id="addForm">
+        <input id="username" type="text" placeholder="TikTok username (without @)" required>
+        <button type="submit" id="addBtn">Add account</button>
+      </form>
+      <div class="muted">Maximum 5 accounts per user. Enter the username only, without @.</div>
+      <div id="addMessage" class="message"></div>
+    </div>
+
+    <div class="card">
+      <div class="top-row">
+        <h2>Your TikTok Accounts</h2>
+        <button id="refreshBtn" class="secondary">Refresh</button>
+      </div>
+      <div id="accountsList" class="muted">Loading accounts...</div>
+    </div>
+
+    <div class="card">
+      <h2>Recent LIVE Activity</h2>
+      <div id="eventsList" class="muted">No activity loaded yet.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+  // 1. Supabase connection
+  const SUPABASE_URL = "https://kugojikxwoervigfpvsq.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_Oy7GFR5WXSvym_LBCEulLA_eDVaBc3V";
+
+  const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  const $ = (id) => document.getElementById(id);
+
+  function showMessage(id, message, isError = false) {
+    const el = $(id);
+    el.textContent = message;
+    el.style.color = isError ? "#b42318" : "#167647";
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;",
+      '"': "&quot;", "'": "&#39;"
+    })[char]);
+  }
+
+  function showLoggedIn(session) {
+    $("authSection").classList.toggle("hidden", !!session);
+    $("appSection").classList.toggle("hidden", !session);
+    if (session) {
+      $("userEmail").textContent = session.user.email || "";
+    }
+  }
+
+  // 2. Login
+  $("authForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const email = $("email").value.trim();
+    const password = $("password").value;
+
+    $("loginBtn").disabled = true;
+    showMessage("authMessage", "Logging in...");
+
+    const { error } = await db.auth.signInWithPassword({ email, password });
+
+    $("loginBtn").disabled = false;
+    if (error) {
+      showMessage("authMessage", error.message, true);
+    } else {
+      showMessage("authMessage", "Login successful.");
+    }
+  });
+
+  // 3. Register
+  $("signupBtn").addEventListener("click", async () => {
+    const email = $("email").value.trim();
+    const password = $("password").value;
+
+    if (!email || password.length < 6) {
+      showMessage("authMessage", "Enter a valid email and a password of at least 6 characters.", true);
+      return;
+    }
+
+    $("signupBtn").disabled = true;
+    showMessage("authMessage", "Creating your account...");
+
+    const { data, error } = await db.auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: window.location.origin + window.location.pathname
+      }
+    });
+
+    $("signupBtn").disabled = false;
+
+    if (error) {
+      showMessage("authMessage", error.message, true);
+    } else if (data.session) {
+      showMessage("authMessage", "Account created. You are now logged in.");
+    } else {
+      showMessage("authMessage", "Registration successful. Please check your email and click the confirmation link before logging in.");
+    }
+  });
+
+  // 4. Logout
+  $("logoutBtn").addEventListener("click", async () => {
+    const { error } = await db.auth.signOut();
+    if (error) showMessage("authMessage", error.message, true);
+  });
+
+  // 5. Add TikTok account
+  $("addForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const username = $("username").value.trim().replace(/^@/, "").toLowerCase();
+
+    if (!/^[a-z0-9._]{2,24}$/.test(username)) {
+      showMessage("addMessage", "Please enter a valid TikTok username.", true);
+      return;
+    }
+
+    $("addBtn").disabled = true;
+    showMessage("addMessage", "Adding account...");
+
+    const { data: existing, error: countError } = await db
+      .from("accounts")
+      .select("id")
+      .eq("is_active", true);
+
+    if (countError) {
+      showMessage("addMessage", countError.message, true);
+      $("addBtn").disabled = false;
+      return;
+    }
+
+    if (existing.length >= 5) {
+      showMessage("addMessage", "You have reached the maximum of 5 accounts.", true);
+      $("addBtn").disabled = false;
+      return;
+    }
+
+    const { error } = await db.from("accounts").insert({ username });
+
+    $("addBtn").disabled = false;
+
+    if (error) {
+      showMessage("addMessage", error.code === "23505"
+        ? "This account has already been added."
+        : error.message, true);
+    } else {
+      $("username").value = "";
+      showMessage("addMessage", "Account added successfully.");
+      await loadDashboard();
+    }
+  });
+
+  // 6. Delete account
+  async function deleteAccount(id, username) {
+    if (!confirm("Remove @" + username + " from your account list?")) return;
+
+    const { error } = await db.from("accounts").delete().eq("id", id);
+
+    if (error) {
+      alert("Could not delete account: " + error.message);
+    } else {
+      await loadDashboard();
+    }
+  }
+
+  // 7. Load accounts, LIVE status and event history
+  async function loadDashboard() {
+    $("accountsList").textContent = "Loading accounts...";
+    $("eventsList").textContent = "Loading activity...";
+
+    const { data: accounts, error } = await db
+      .from("accounts")
+      .select("id, username, is_active, created_at")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      $("accountsList").textContent = error.message;
+      $("eventsList").textContent = "Could not load activity.";
+      return;
+    }
+
+    if (!accounts || accounts.length === 0) {
+      $("accountsList").textContent = "No TikTok accounts added yet.";
+      $("eventsList").textContent = "No LIVE activity yet.";
+      return;
+    }
+
+    const ids = accounts.map(account => account.id);
+
+    const [statusResult, eventResult] = await Promise.all([
+      db.from("live_status")
+        .select("account_id, is_live, started_at, checked_at")
+        .in("account_id", ids),
+      db.from("live_events")
+        .select("id, account_id, event_type, occurred_at")
+        .in("account_id", ids)
+        .order("occurred_at", { ascending: false })
+        .limit(20)
+    ]);
+
+    if (statusResult.error) {
+      $("accountsList").textContent = statusResult.error.message;
+      return;
+    }
+
+    const statusMap = {};
+    (statusResult.data || []).forEach(item => {
+      statusMap[item.account_id] = item;
+    });
+
+    $("accountsList").innerHTML = accounts.map(account => {
+      const status = statusMap[account.id];
+      let statusText = "Waiting for monitor";
+      let statusClass = "pending";
+      let checkedText = "";
+
+      if (status) {
+        statusText = status.is_live ? "● LIVE" : "● OFFLINE";
+        statusClass = status.is_live ? "live" : "offline";
+        checkedText = status.checked_at
+          ? "Last checked: " + new Date(status.checked_at).toLocaleString()
+          : "";
+      }
+
+      return `
+        <div class="account">
+          <div class="account-row">
+            <div>
+              <div class="username">@${escapeHTML(account.username)}</div>
+              <div class="status ${statusClass}">${statusText}</div>
+              <div class="muted">${escapeHTML(checkedText)}</div>
+            </div>
+            <button class="danger" data-delete="${escapeHTML(account.id)}"
+              data-username="${escapeHTML(account.username)}">Remove</button>
+          </div>
+        </div>`;
+    }).join("");
+
+    $("accountsList").querySelectorAll("[data-delete]").forEach(button => {
+      button.addEventListener("click", () => {
+        deleteAccount(button.dataset.delete, button.dataset.username);
+      });
+    });
+
+    if (eventResult.error) {
+      $("eventsList").textContent = eventResult.error.message;
+      return;
+    }
+
+    if (!eventResult.data || eventResult.data.length === 0) {
+      $("eventsList").textContent = "No LIVE events recorded yet.";
+      return;
+    }
+
+    const names = {};
+    accounts.forEach(account => { names[account.id] = account.username; });
+
+    $("eventsList").innerHTML = eventResult.data.map(item => {
+      const started = item.event_type === "LIVE_STARTED";
+      const label = started ? "🔴 LIVE started" : "⚪ LIVE ended";
+      return `
+        <div class="event">
+          <strong>${label}</strong>
+          <div>@${escapeHTML(names[item.account_id] || "Unknown account")}</div>
+          <div class="muted">${escapeHTML(new Date(item.occurred_at).toLocaleString())}</div>
+        </div>`;
+    }).join("");
+  }
+
+  $("refreshBtn").addEventListener("click", loadDashboard);
+
+  // 8. Restore login session when the page opens
+  async function initialize() {
+    const { data: { session } } = await db.auth.getSession();
+    showLoggedIn(session);
+    if (session) await loadDashboard();
+  }
+
+  db.auth.onAuthStateChange((event, session) => {
+    showLoggedIn(session);
+    if (session) {
+      setTimeout(loadDashboard, 0);
+    } else {
+      $("accountsList").textContent = "";
+      $("eventsList").textContent = "";
+    }
+  });
+
+  initialize();
+</script>
+</body>
+</html>
+
