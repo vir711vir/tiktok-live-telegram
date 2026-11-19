@@ -1,20 +1,14 @@
 
-import asyncio
-import json
 import os
-from pathlib import Path
 from datetime import datetime, timezone
 
 import requests
 from TikTokLive import TikTokLiveClient
 
-ROOT = Path(__file__).parent
-
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -26,121 +20,68 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 def supabase_get(table, params):
-    r = requests.get(
+    response = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}",
         headers=HEADERS,
         params=params,
         timeout=20,
     )
-    r.raise_for_status()
-    return r.json()
+    response.raise_for_status()
+    return response.json()
 
-def supabase_post(table, data, upsert=False):
-    headers = HEADERS.copy()
-
-    if upsert:
-        headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
-
-    r = requests.post(
+def supabase_write(table, data, upsert=False):
+    headers = dict(HEADERS)
+    headers["Prefer"] = (
+        "resolution=merge-duplicates,return=minimal"
+        if upsert else "return=minimal"
+    )
+    response = requests.post(
         f"{SUPABASE_URL}/rest/v1/{table}",
         headers=headers,
         params={"on_conflict": "account_id"} if upsert else None,
         json=data,
         timeout=20,
     )
-    r.raise_for_status()
-
-def get_accounts():
-    rows = supabase_get(
-        "accounts",
-        {
-            "select": "id,username",
-            "is_active": "eq.true",
-            "order": "created_at.asc",
-        },
-    )
-
-    if not rows:
-        raise ValueError("No active accounts found in Supabase.")
-
-    if len(rows) > 5:
-        raise ValueError(
-            "More than 5 active accounts found. "
-            "Current monitor supports up to 5."
-        )
-
-    return rows
+    response.raise_for_status()
 
 def telegram(message):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+    response = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         json={
-            "chat_id": CHAT_ID,
+            "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
             "disable_web_page_preview": True,
         },
         timeout=20,
     )
-    r.raise_for_status()
+    response.raise_for_status()
+    if not response.json().get("ok"):
+        raise RuntimeError("Telegram message failed")
 
-    if not r.json().get("ok"):
-        raise RuntimeError("Telegram rejected the message")
-
-async def check(username):
+async def check_live(username):
     client = TikTokLiveClient(unique_id=f"@{username}")
-    return bool(
-        await asyncio.wait_for(client.is_live(), timeout=35)
+    return bool(await client.is_live())
+
+def main():
+    accounts = supabase_get(
+        "accounts",
+        {"select": "id,username,is_active", "is_active": "eq.true"},
     )
 
-def save_live_status(account_id, live, started_at):
-    supabase_post(
-        "live_status",
-        {
-            "account_id": account_id,
-            "is_live": live,
-            "started_at": started_at,
-            "checked_at": now(),
-        },
-        upsert=True,
-    )
+    print(f"Found {len(accounts)} active accounts in Supabase.")
 
-def save_event(account_id, event_type):
-    supabase_post(
-        "live_events",
-        {
-            "account_id": account_id,
-            "event_type": event_type,
-            "occurred_at": now(),
-        },
-    )
-
-async def main():
-    state_file = ROOT / "state.json"
-
-    try:
-        old = json.loads(state_file.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        old = {}
-
-    new = dict(old)
-
-    rows = get_accounts()
-    print(f"Found {len(rows)} active accounts in Supabase.")
-
-    for account in rows:
+    for account in accounts:
         account_id = account["id"]
-        username = account["username"].strip().lstrip("@")
+        username = account["username"]
 
         try:
-            live = await check(username)
-        except Exception as e:
-            print(
-                f"Could not check @{username}: "
-                f"{type(e).__name__}: {e}"
-            )
+            import asyncio
+            live = asyncio.run(check_live(username))
+        except Exception as error:
+            print(f"Could not check @{username}: {type(error).__name__}: {error}")
             continue
 
-        previous = supabase_get(
+        old_rows = supabase_get(
             "live_status",
             {
                 "select": "is_live,started_at",
@@ -149,46 +90,56 @@ async def main():
             },
         )
 
-        if previous:
-            was_live = previous[0]["is_live"]
-            started_at = previous[0]["started_at"]
-        else:
-            was_live = old.get(username)
-            started_at = None
-
-        print(
-            f"@{username}: "
-            f"{'LIVE' if live else 'OFFLINE'}"
-        )
+        old = old_rows[0] if old_rows else None
+        was_live = old["is_live"] if old else False
+        checked_at = now()
 
         if live:
-            if was_live is not True:
-                started_at = now()
-
-                save_event(account_id, "started")
-
-                telegram(
-                    f"🔴 @{username} just started a LIVE!\n"
-                    f"https://www.tiktok.com/@{username}/live"
-                )
-
-            save_live_status(account_id, True, started_at)
-
+            started_at = (
+                old.get("started_at")
+                if was_live and old
+                else checked_at
+            )
         else:
-            if was_live is True:
-                save_event(account_id, "ended")
+            started_at = None
 
-                telegram(
-                    f"⚫ @{username} has ended their LIVE."
-                )
+        supabase_write(
+            "live_status",
+            {
+                "account_id": account_id,
+                "is_live": live,
+                "started_at": started_at,
+                "checked_at": checked_at,
+            },
+            upsert=True,
+        )
 
-            save_live_status(account_id, False, None)
+        print(f"@{username}: {'LIVE' if live else 'OFFLINE'}")
 
-        new[username] = live
+        if live and not was_live:
+            supabase_write(
+                "live_events",
+                {
+                    "account_id": account_id,
+                    "event_type": "LIVE_STARTED",
+                    "occurred_at": checked_at,
+                },
+            )
+            telegram(
+                f"🔴 @{username} just started a LIVE!\n"
+                f"https://www.tiktok.com/@{username}/live"
+            )
 
-    state_file.write_text(
-        json.dumps(new, indent=2) + "\n"
-    )
+        elif not live and was_live:
+            supabase_write(
+                "live_events",
+                {
+                    "account_id": account_id,
+                    "event_type": "LIVE_ENDED",
+                    "occurred_at": checked_at,
+                },
+            )
+            telegram(f"⚫ @{username} has ended their LIVE.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
