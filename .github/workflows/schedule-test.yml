@@ -1,0 +1,13 @@
+name: Schedule Test
+
+on:
+  schedule:
+    - cron: "7-59/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test scheduled trigger
+        run: echo "GitHub scheduled trigger is working"
