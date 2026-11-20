@@ -19,11 +19,11 @@ SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-VAPID_PRIVATE_KEY = os.environ["VAPID_PRIVATE_KEY"]
-VAPID_SUBJECT = os.environ.get(
-    "VAPID_SUBJECT",
-    "mailto:admin@example.com"
-)
+VAPID_PRIVATE_KEY = os.environ["VAPID_PRIVATE_KEY"].replace(
+    "\\n", "\n"
+).strip()
+
+VAPID_SUBJECT = "mailto:edcsshop@gmail.com"
 
 
 # =====================================
@@ -57,7 +57,8 @@ def supabase_write(table, data, upsert=False):
 
     headers["Prefer"] = (
         "resolution=merge-duplicates,return=minimal"
-        if upsert else "return=minimal"
+        if upsert
+        else "return=minimal"
     )
 
     response = requests.post(
@@ -70,21 +71,11 @@ def supabase_write(table, data, upsert=False):
     response.raise_for_status()
 
 
-def supabase_delete(table, params):
-    response = requests.delete(
-        f"{SUPABASE_URL}/rest/v1/{table}",
-        headers=HEADERS,
-        params=params,
-        timeout=20,
-    )
-    response.raise_for_status()
-
-
 # =====================================
 # 3. Telegram notification
 # =====================================
 
-def telegram(message):
+def send_telegram(message):
     response = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         json={
@@ -102,10 +93,10 @@ def telegram(message):
 
 
 # =====================================
-# 4. Web Push notification
+# 4. iPad / PWA Push Notification
 # =====================================
 
-def send_web_push(user_id, title, body, url, tag):
+def send_push(user_id, username, event_type):
 
     subscriptions = supabase_get(
         "push_subscriptions",
@@ -116,69 +107,44 @@ def send_web_push(user_id, title, body, url, tag):
     )
 
     if not subscriptions:
-        print(f"No Push subscription for user {user_id}.")
+        print(f"No push subscription found for user {user_id}.")
         return
 
-    payload = json.dumps({
+    if event_type == "LIVE_STARTED":
+        title = "🔴 TikTok LIVE Started"
+        body = f"@{username} just started a LIVE!"
+    else:
+        title = "⚫ TikTok LIVE Ended"
+        body = f"@{username} has ended their LIVE."
+
+    payload = {
         "title": title,
         "body": body,
-        "url": url,
-        "tag": tag,
-    })
+        "url": f"https://www.tiktok.com/@{username}/live",
+        "tag": f"tiktok-{username}",
+    }
 
     for item in subscriptions:
-
-        subscription_id = item["id"]
-        subscription_info = item["subscription"]
-
-        if isinstance(subscription_info, str):
-            subscription_info = json.loads(subscription_info)
-
         try:
             webpush(
-                subscription_info=subscription_info,
-                data=payload,
+                subscription_info=item["subscription"],
+                data=json.dumps(payload),
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims={
                     "sub": VAPID_SUBJECT,
                 },
             )
 
-            print(f"Web Push sent to user {user_id}.")
+            print(f"Push notification sent for @{username}.")
 
         except WebPushException as error:
-
-            status_code = (
-                error.response.status_code
-                if error.response is not None
-                else None
-            )
-
             print(
-                f"Web Push failed: "
-                f"{type(error).__name__}: {error}"
+                f"Push failed for @{username}: {error}"
             )
-
-            # Remove expired subscriptions
-            if status_code in (404, 410):
-                try:
-                    supabase_delete(
-                        "push_subscriptions",
-                        {"id": f"eq.{subscription_id}"},
-                    )
-                    print(
-                        f"Removed expired subscription "
-                        f"{subscription_id}."
-                    )
-                except Exception as delete_error:
-                    print(
-                        f"Could not remove expired subscription: "
-                        f"{delete_error}"
-                    )
 
         except Exception as error:
             print(
-                f"Unexpected Push error: "
+                f"Unexpected push error for @{username}: "
                 f"{type(error).__name__}: {error}"
             )
 
@@ -188,9 +154,11 @@ def send_web_push(user_id, title, body, url, tag):
 # =====================================
 
 async def check_live(username):
+
     client = TikTokLiveClient(
         unique_id=f"@{username}"
     )
+
     return bool(await client.is_live())
 
 
@@ -241,6 +209,7 @@ def main():
             )
 
             old = old_rows[0] if old_rows else None
+
             was_live = old["is_live"] if old else False
 
             checked_at = now()
@@ -272,10 +241,6 @@ def main():
                 f"{'LIVE' if live else 'OFFLINE'}"
             )
 
-            live_url = (
-                f"https://www.tiktok.com/@{username}/live"
-            )
-
             # LIVE started
             if live and not was_live:
 
@@ -288,23 +253,19 @@ def main():
                     },
                 )
 
-                message = (
+                send_telegram(
                     f"🔴 @{username} just started a LIVE!\n"
-                    f"{live_url}"
+                    f"https://www.tiktok.com/@{username}/live"
                 )
 
-                try:
-                    telegram(message)
-                    print("Telegram LIVE started notification sent.")
-                except Exception as error:
-                    print(f"Telegram error: {error}")
+                send_push(
+                    user_id,
+                    username,
+                    "LIVE_STARTED",
+                )
 
-                send_web_push(
-                    user_id=user_id,
-                    title=f"🔴 @{username} is LIVE!",
-                    body=f"@{username} just started a LIVE.",
-                    url=live_url,
-                    tag=f"{username}-live",
+                print(
+                    f"Notifications sent: @{username} LIVE started."
                 )
 
             # LIVE ended
@@ -319,22 +280,18 @@ def main():
                     },
                 )
 
-                message = (
+                send_telegram(
                     f"⚫ @{username} has ended their LIVE."
                 )
 
-                try:
-                    telegram(message)
-                    print("Telegram LIVE ended notification sent.")
-                except Exception as error:
-                    print(f"Telegram error: {error}")
+                send_push(
+                    user_id,
+                    username,
+                    "LIVE_ENDED",
+                )
 
-                send_web_push(
-                    user_id=user_id,
-                    title=f"⚫ @{username} ended their LIVE",
-                    body=f"@{username} is no longer LIVE.",
-                    url=live_url,
-                    tag=f"{username}-live",
+                print(
+                    f"Notifications sent: @{username} LIVE ended."
                 )
 
         except Exception as error:
