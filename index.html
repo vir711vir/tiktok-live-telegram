@@ -101,7 +101,7 @@
         <input id="username" type="text" placeholder="TikTok username (without @)" required>
         <button type="submit" id="addBtn">Add account</button>
       </form>
-      <div class="muted">Maximum 5 accounts per user. Enter the username only, without @.</div>
+      <div class="muted">Maximum 10 accounts per user. Enter the username only, without @.</div>
       <div id="addMessage" class="message"></div>
     </div>
 
@@ -344,8 +344,8 @@ $("enableNotifications").addEventListener(
       return;
     }
 
-    if (existing.length >= 5) {
-      showMessage("addMessage", "You have reached the maximum of 5 accounts.", true);
+    if (existing.length >= 10) {
+      showMessage("addMessage", "You have reached the maximum of 10 accounts.", true);
       $("addBtn").disabled = false;
       return;
     }
