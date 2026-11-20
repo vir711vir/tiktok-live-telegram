@@ -1,10 +1,12 @@
 
 import os
+import json
 import asyncio
 from datetime import datetime, timezone
 
 import requests
 from TikTokLive import TikTokLiveClient
+from pywebpush import webpush, WebPushException
 
 
 # =====================================
@@ -16,6 +18,12 @@ SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+VAPID_PRIVATE_KEY = os.environ["VAPID_PRIVATE_KEY"]
+VAPID_SUBJECT = os.environ.get(
+    "VAPID_SUBJECT",
+    "mailto:admin@example.com"
+)
 
 
 # =====================================
@@ -40,7 +48,6 @@ def supabase_get(table, params):
         params=params,
         timeout=20,
     )
-
     response.raise_for_status()
     return response.json()
 
@@ -50,8 +57,7 @@ def supabase_write(table, data, upsert=False):
 
     headers["Prefer"] = (
         "resolution=merge-duplicates,return=minimal"
-        if upsert
-        else "return=minimal"
+        if upsert else "return=minimal"
     )
 
     response = requests.post(
@@ -61,7 +67,16 @@ def supabase_write(table, data, upsert=False):
         json=data,
         timeout=20,
     )
+    response.raise_for_status()
 
+
+def supabase_delete(table, params):
+    response = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers=HEADERS,
+        params=params,
+        timeout=20,
+    )
     response.raise_for_status()
 
 
@@ -87,19 +102,100 @@ def telegram(message):
 
 
 # =====================================
-# 4. TikTok LIVE checker
+# 4. Web Push notification
+# =====================================
+
+def send_web_push(user_id, title, body, url, tag):
+
+    subscriptions = supabase_get(
+        "push_subscriptions",
+        {
+            "select": "id,subscription",
+            "user_id": f"eq.{user_id}",
+        },
+    )
+
+    if not subscriptions:
+        print(f"No Push subscription for user {user_id}.")
+        return
+
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "url": url,
+        "tag": tag,
+    })
+
+    for item in subscriptions:
+
+        subscription_id = item["id"]
+        subscription_info = item["subscription"]
+
+        if isinstance(subscription_info, str):
+            subscription_info = json.loads(subscription_info)
+
+        try:
+            webpush(
+                subscription_info=subscription_info,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={
+                    "sub": VAPID_SUBJECT,
+                },
+            )
+
+            print(f"Web Push sent to user {user_id}.")
+
+        except WebPushException as error:
+
+            status_code = (
+                error.response.status_code
+                if error.response is not None
+                else None
+            )
+
+            print(
+                f"Web Push failed: "
+                f"{type(error).__name__}: {error}"
+            )
+
+            # Remove expired subscriptions
+            if status_code in (404, 410):
+                try:
+                    supabase_delete(
+                        "push_subscriptions",
+                        {"id": f"eq.{subscription_id}"},
+                    )
+                    print(
+                        f"Removed expired subscription "
+                        f"{subscription_id}."
+                    )
+                except Exception as delete_error:
+                    print(
+                        f"Could not remove expired subscription: "
+                        f"{delete_error}"
+                    )
+
+        except Exception as error:
+            print(
+                f"Unexpected Push error: "
+                f"{type(error).__name__}: {error}"
+            )
+
+
+# =====================================
+# 5. TikTok LIVE checker
 # =====================================
 
 async def check_live(username):
     client = TikTokLiveClient(
         unique_id=f"@{username}"
     )
-
     return bool(await client.is_live())
 
 
 # =====================================
-# 5. Main monitoring process
+# 6. Main monitoring process
 # =====================================
 
 def main():
@@ -107,7 +203,7 @@ def main():
     accounts = supabase_get(
         "accounts",
         {
-            "select": "id,username,is_active",
+            "select": "id,username,is_active,user_id",
             "is_active": "eq.true",
         },
     )
@@ -120,6 +216,7 @@ def main():
 
         account_id = account["id"]
         username = account["username"]
+        user_id = account["user_id"]
 
         try:
             live = asyncio.run(check_live(username))
@@ -144,7 +241,6 @@ def main():
             )
 
             old = old_rows[0] if old_rows else None
-
             was_live = old["is_live"] if old else False
 
             checked_at = now()
@@ -176,6 +272,10 @@ def main():
                 f"{'LIVE' if live else 'OFFLINE'}"
             )
 
+            live_url = (
+                f"https://www.tiktok.com/@{username}/live"
+            )
+
             # LIVE started
             if live and not was_live:
 
@@ -188,13 +288,23 @@ def main():
                     },
                 )
 
-                telegram(
+                message = (
                     f"🔴 @{username} just started a LIVE!\n"
-                    f"https://www.tiktok.com/@{username}/live"
+                    f"{live_url}"
                 )
 
-                print(
-                    f"Notification sent: @{username} LIVE started."
+                try:
+                    telegram(message)
+                    print("Telegram LIVE started notification sent.")
+                except Exception as error:
+                    print(f"Telegram error: {error}")
+
+                send_web_push(
+                    user_id=user_id,
+                    title=f"🔴 @{username} is LIVE!",
+                    body=f"@{username} just started a LIVE.",
+                    url=live_url,
+                    tag=f"{username}-live",
                 )
 
             # LIVE ended
@@ -209,12 +319,22 @@ def main():
                     },
                 )
 
-                telegram(
+                message = (
                     f"⚫ @{username} has ended their LIVE."
                 )
 
-                print(
-                    f"Notification sent: @{username} LIVE ended."
+                try:
+                    telegram(message)
+                    print("Telegram LIVE ended notification sent.")
+                except Exception as error:
+                    print(f"Telegram error: {error}")
+
+                send_web_push(
+                    user_id=user_id,
+                    title=f"⚫ @{username} ended their LIVE",
+                    body=f"@{username} is no longer LIVE.",
+                    url=live_url,
+                    tag=f"{username}-live",
                 )
 
         except Exception as error:
@@ -226,7 +346,7 @@ def main():
 
 
 # =====================================
-# 6. Start
+# 7. Start
 # =====================================
 
 if __name__ == "__main__":
